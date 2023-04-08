@@ -14,7 +14,41 @@ __all__ = [
     "adaptive_max_pool2d",
     "adaptive_avg_pool2d",
     "max_pool2d",
+    "max_pool1d"
 ]
+
+
+def max_pool1d(
+    self,
+    kernel_size,
+    padding=0,
+    stride=None,
+    dilation=1,
+    ceil_mode=False,
+    return_indices=False,
+):
+    # print('max_pool1d')
+    assert return_indices is False
+    if stride is None:
+        stride = 1
+    l = kernel_size - 1
+    assert l >= 0
+    # start = -l
+    # end = self.data.size(-1) + l
+    # out_shape = self.data.size()[:-1] + ((end - start) // 2,)
+    tmp = self.clone()
+    # print(tmp.data.size())
+    tmp.data = torch.repeat_interleave(tmp.data, 2, dim=1)
+    # print(tmp.data.size())
+    max_vals = tmp.max_pool2d(
+        kernel_size,
+        padding,
+        stride,
+        dilation,
+        ceil_mode,
+        return_indices,
+    )
+    return max_vals
 
 
 def max_pool2d(
@@ -29,6 +63,7 @@ def max_pool2d(
     """Applies a 2D max pooling over an input signal composed of several
     input planes.
     """
+    # print('max_pool2d')
     max_input = self.clone()
     max_input.data, output_size = _pool2d_reshape(
         self.data,

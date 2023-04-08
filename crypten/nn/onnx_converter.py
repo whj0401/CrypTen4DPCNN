@@ -36,7 +36,8 @@ except ImportError:
     SYM_REGISTRY = False
 
 
-_OPSET_VERSION = 17
+# _OPSET_VERSION = 17
+_OPSET_VERSION = 10
 
 
 def from_onnx(onnx_string_or_file):
@@ -153,7 +154,8 @@ ONNX_TO_CRYPTEN = {
     "adaptive_max_pool2d": module.AdaptiveMaxPool2d,
     "AveragePool": module.AvgPool2d,
     "Clip": module.Hardtanh,
-    "MaxPool": module.MaxPool2d,
+    # "MaxPool": module.MaxPool2d,
+    "MaxPool": module.MaxPool1d,
     "Pad": module._ConstantPad,
     "Relu": module.ReLU,
     "ReduceMean": module.Mean,

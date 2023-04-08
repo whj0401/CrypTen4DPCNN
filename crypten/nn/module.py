@@ -13,6 +13,7 @@ import crypten
 import torch
 import torch.onnx.symbolic_helper as sym_help
 from crypten.common.functions.pooling import _adaptive_pool2d_helper
+import numpy as np
 
 
 class Module:
@@ -656,7 +657,7 @@ class Graph(Container):
     def forward(self, *args):
         assert len(args) == len(
             self.input_names
-        ), f"Expected {len(self.input_names)} inputs but received {len(args)}."
+        ), f"Expected {len(self.input_names)} inputs but received {len(args)}.  {str(self.input_names)}"
 
         # keep track of all values that have been computed:
         values = {self.input_names[idx]: args[idx] for idx in range(len(args))}
@@ -1223,8 +1224,7 @@ class Transpose(Module):
         # New Linear jit tracer causes Transpose module to have a weight
         if hasattr(self, "weight"):
             input = self.weight
-
-        assert input.dim() == len(self.perm)
+        assert input.dim() == len(self.perm), f"input with shape of {input.shape} and perm={self.perm}"
         return input.permute(self.perm)
 
     @staticmethod
@@ -1799,7 +1799,9 @@ class _ConstantPad(Module):
         if attributes is None:
             attributes = {}
         assert attributes["mode"] == b"constant", "only constant padding supported"
-        return _ConstantPad(None, 0, 0, mode="constant")
+        return _ConstantPad([0, 0, 0, 0], 0, 0, mode="constant")
+        # return _ConstantPad(attributes['pads'], 0, 0, mode="constant")
+        # return _ConstantPad(None, 0, 0, mode="constant")
 
 
 class ConstantPad1d(_ConstantPad):
@@ -2654,6 +2656,103 @@ class MaxPool2d(_Pool2d):
         return super(MaxPool2d, MaxPool2d).from_onnx("max", attributes=attributes)
 
 
+class _Pool1d(Module):
+    """
+    Module that performs 1D pooling.
+    Applies a 1D max or average pooling over an input signal composed of several input
+    planes.
+
+    If :attr:`padding` is non-zero, then the input is implicitly zero-padded on
+    both sides for :attr:`padding` number of points. :attr:`dilation` controls
+    the spacing between the kernel points. It is harder to describe, but this
+    `link`_ has a nice visualization of what :attr:`dilation` does.
+
+    The parameters :attr:`kernel_size`, :attr:`stride`, :attr:`padding`,
+    :attr:`dilation` can either be:
+
+        - a single ``int`` -- in which case the same value is used for the
+        height and width dimension
+        - a ``tuple`` of two ints -- in which case, the first `int` is used for
+        the height dimension, and the second `int` for the width dimension
+
+    Args:
+        pool_type (str): specifies "average" or "max" pooling
+        kernel_size: the size of the window to take a max over
+        stride: the stride of the window. Default value is :attr:`kernel_size`
+        padding: implicit zero padding to be added on both sides
+
+    .. _link:
+        https://github.com/vdumoulin/conv_arithmetic/blob/master/README.md
+    """
+
+    def __init__(self, pool_type, kernel_size, stride=None, padding=0, ceil_mode=False):
+        super().__init__()
+        self.pool_type = pool_type
+        self.kernel_size = kernel_size
+        self.padding = padding
+        self.stride = stride
+        self.ceil_mode = ceil_mode
+
+    def forward(self, x):
+        args = [self.kernel_size]
+        kwargs = {
+            "stride": self.stride,
+            "padding": self.padding,
+            "ceil_mode": self.ceil_mode,
+        }
+        if self.pool_type == "average":
+            return x.avg_pool1d(*args, **kwargs)
+        elif self.pool_type == "max":
+            return x.max_pool1d(*args, **kwargs)
+        else:
+            raise ValueError("Unknown pooling type: %s" % self.pool_type)
+
+    @staticmethod
+    def from_onnx(pool_type, attributes=None):
+
+        # check attributes:
+        if attributes is None:
+            attributes = {}
+        if "pads" not in attributes:
+            attributes["pads"] = [0]
+        assert _all_the_same(["kernel_shape"]), "only square kernels are supported"
+        assert _all_the_same(
+            attributes["strides"]
+        ), "stride must be the same in each dimension"
+        attributes["ceil_mode"] = attributes.get("ceil_mode", 0)
+        attributes["ceil_mode"] = attributes["ceil_mode"] > 0
+
+        # initialize module
+        args = [attributes["kernel_shape"][0]]
+        kwargs = {
+            "stride": attributes["strides"][0],
+            "padding": attributes["pads"][0],
+            "ceil_mode": attributes["ceil_mode"],
+        }
+        if pool_type == "average":
+            raise NotImplementedError(f'{pool_type} is not supported yet')
+            # return AvgPool1d(*args, **kwargs)
+        elif pool_type == "max":
+            return MaxPool1d(*args, **kwargs)
+        else:
+            raise ValueError("Unknown pooling type: %s" % pool_type)
+
+
+class MaxPool1d(_Pool1d):
+    """
+    Module that performs 1D max pooling
+    """
+
+    def __init__(self, kernel_size, stride=None, padding=0, ceil_mode=False):
+        super().__init__(
+            "max", kernel_size, stride=stride, padding=padding, ceil_mode=ceil_mode
+        )
+
+    @staticmethod
+    def from_onnx(attributes=None):
+        return super(MaxPool1d, MaxPool1d).from_onnx("max", attributes=attributes)
+
+
 class AdaptiveAvgPool2d(Module):
     r"""Applies a 2D adaptive average pooling over an input signal composed of several input planes.
 
@@ -2955,6 +3054,188 @@ class GroupNorm(Module):
         raise NotImplementedError("GroupNorm is not implemented.")
 
 
+# added by WHJ
+class Identity(Module):
+    """
+    Module that performs Identity operator
+    The Input is a tensor (differentiable)
+    The outputs are tensor to copy input into
+    """
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, input):
+        return torch.clone(input)
+
+    @staticmethod
+    def from_onnx(attributes=None):
+        return Identity()
+
+
+class Tanh(Module):
+    """
+    Tanh operator
+    """
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, input):
+        return torch.tanh(input)
+
+    @staticmethod
+    def from_onnx(attributes=None):
+        return Tanh()
+
+
+class ReduceL2(Module):
+    def __init__(self, keepdims=1, noop_with_empty_axes=0):
+        super().__init__()
+        self.keepdims = keepdims
+        self.noop_with_empty_axes = noop_with_empty_axes
+
+    def forward(self, data, axes=None):
+        if self.noop_with_empty_axes == 0:
+            # Optional input list of integers, along which to reduce.
+            # The default is to reduce over all the dimensions of the input tensor
+            # if 'noop_with_empty_axes' is false
+            return torch.linalg.norm(data, keepdim=(self.keepdims == 1), ord=2)
+        else:
+            # else act as an Identity op when 'noop_with_empty_axes' is true.
+            # Accepted range is [-r, r-1] where r = rank(data).
+            r = len(data.shape)
+            assert -r <= axes <= r - 1, f"Wrong usage: {data.shape} with axes={axes}"
+            return torch.linalg.norm(data, dim=axes, keepdim=(self.keepdims == 1), ord=2)
+
+    @staticmethod
+    def from_onnx(attributes=None):
+        if attributes is None:
+            return ReduceL2()
+        keepdims = attributes.get('keepdims', 1)
+        noop_with_empty_axes = attributes.get('noop_with_empty_axes', 0)
+        return ReduceL2(keepdims, noop_with_empty_axes)
+
+
+class Split(Module):
+    """
+    Split a tensor into a list of tensors, along the specified 'axis'.
+    """
+    def __init__(self, axis, num_outputs):
+        super().__init__()
+        self.axis = axis
+        self.num_outputs = num_outputs
+
+    def forward(self, input, split=None):
+        axis = self.axis
+        rank = len(input.shape)
+        if self.num_outputs is None:
+            num_outputs = input.shape[axis]
+        chunk_size = input.shape[axis] // num_outputs
+        last_chunk_size = input.shape[axis] - num_outputs * chunk_size
+        if axis < 0:
+            axis = rank + axis
+        assert 0 <= axis < len(input.shape)
+        if chunk_size == 1:
+            # use reshape directly
+            ret_shape = [num_outputs]
+            for idx, dim in enumerate(input.shape):
+                if idx == axis:
+                    ret_shape.append(1)
+                else:
+                    ret_shape.append(dim)
+            return input.reshape(tuple(ret_shape))
+
+        ret = []
+        idx = 0
+        while len(ret) < num_outputs:
+            item = input.narrow(axis, idx, idx + chunk_size)
+            idx += chunk_size
+            ret.append(item)
+        return torch.Tensor(ret)
+
+    @staticmethod
+    def from_onnx(attributes):
+        axis = attributes.get('axis', 0)
+        num_outputs = attributes.get('num_outputs', None)
+        return Split(axis, num_outputs)
+
+
+class GRU(Module):
+    """
+    Module that performs GRU operator
+    """
+    def __init__(self, input_size, hidden_size, num_layers, bias, batch_first, dropout, bidirectional):
+        super().__init__()
+        self.pytorch_module = torch.nn.GRU(
+            input_size=input_size,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            bias=bias,
+            batch_first=batch_first,
+            dropout=dropout,
+            bidirectional=bidirectional
+        )
+        self.activation_alpha = None
+        self.activation_beta = None
+        self.activations = None
+        self.clip = None
+        if bidirectional:
+            self.direction = "bidirectional"
+            self.num_directions = 2
+        else:
+            self.direction = "forward"
+            self.num_directions = 1
+        self.hidden_size = hidden_size
+        self.linear_before_reset = 0
+        self.num_layers = num_layers
+
+    def forward(self, x):
+        X = x[0]
+        seq_len, batch_size, input_size = X.shape
+        W = x[1]
+        R = x[2]
+        if len(x) > 3:
+            B = x[3]
+        else:
+            B = torch.zeros((self.num_directions, 6*self.hidden_size),
+                            dtype=X.dtype)
+        if len(x) > 4:
+            sequence_lens = x[4]
+        else:
+            sequence_lens = torch.ones((batch_size,), dtype=X.dtype) * seq_len
+        if len(x) > 5:
+            initial_h = x[5]
+        else:
+            initial_h = torch.zeros(
+                (self.num_directions, batch_size, self.hidden_size),
+                dtype=X.dtype)
+        # the layer must be 1 here
+        # W will be [weight_ih_l0, weight_ih_l0_reverse]
+        # R will be [weight_hh_l0, weight_hh_l0_reverse]
+        # B will be [bias_ih_l0, bias_ih_l0_reverse]
+        state_dict = {
+            'weight_ih_l0': W[0],
+            'weight_ih_l0_reverse': W[1],
+            'weight_hh_l0': R[0],
+            'weight_hh_l0_reverse': R[1],
+            'bias_ih_l0': B[0],
+            'bias_ih_l0_reverse': B[0]
+        }
+        self.pytorch_module.load_state_dict(state_dict)
+        return self.pytorch_module(X, initial_h)
+
+    @staticmethod
+    def from_onnx(attributes=None):
+        input_size = attributes.get('input_size', 100)
+        hidden_size = attributes.get('hidden_size', 50)
+        num_layers = 1
+        bias = attributes.get('bias', True)
+        batch_first = attributes.get('batch_first', True)
+        dropout = 0
+        bidirectional = attributes.get('bidirectional', True)
+        return GRU(input_size, hidden_size, num_layers, bias, batch_first, dropout, bidirectional)
+
+# end by WHJ
+
 def _all_the_same(items):
     """
     Checks whether all values in a list are the same.
@@ -2974,3 +3255,5 @@ def _identify_bool_attributes_with_defaults(
     if attr_name in attributes and attributes[attr_name] != attr_value:
         output = not default
     return output
+
+

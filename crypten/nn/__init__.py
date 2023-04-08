@@ -46,6 +46,7 @@ from .module import (
     Linear,
     LogSoftmax,
     MatMul,
+    MaxPool1d,
     MaxPool2d,
     Mean,
     Module,
